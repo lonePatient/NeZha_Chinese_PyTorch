@@ -1,6 +1,6 @@
 ## NeZha_Chinese_PyTorch
 
-pytorch版NEZHA，适配transformer
+ PyTorch版NEZHA，适配最新transformers模块
 
 论文下载地址: [NEZHA: Neural Contextualized Representation for Chinese Language Understanding](https://arxiv.org/abs/1909.00204)
 
@@ -33,7 +33,7 @@ sh scripts/run_task_text_classification_chnsenti.sh
 ```
 ### 结果
 
-| NEZHA(base-www) | chnsenti  |
+| NEZHA(base-www) | chnsenti（dev）  |
 | --------------- | --------- |
 | tensorflow      | 94.75     |
 | pytorch         | **94.92** |
