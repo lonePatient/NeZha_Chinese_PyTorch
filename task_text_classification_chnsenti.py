@@ -83,7 +83,7 @@ def main():
     # trainer
     logger.info("initializing traniner")
     trainer = TextClassifierTrainer(logger=logger, args=args, collate_fn=processor.collate_fn,
-                                    batch_input_keys=processor.get_batch_keys(),
+                                    input_keys=processor.get_input_keys(),
                                     metrics=[Accuracy()])
     # do train
     if args.do_train:
@@ -108,19 +108,6 @@ def main():
                 results.update(result)
         output_eval_file = os.path.join(args.output_dir, "eval_results.txt")
         dict_to_text(output_eval_file, results)
-
-    # do predict
-    if args.do_predict:
-        test_dataset = processor.create_dataset(args.eval_max_seq_length, 'test.tsv', 'test')
-        if args.checkpoint_number == 0:
-            raise ValueError("checkpoint number should > 0,but get %d", args.checkpoint_number)
-        checkpoints = get_checkpoints(args.output_dir, args.checkpoint_number, WEIGHTS_NAME)
-        for checkpoint in checkpoints:
-            global_step = checkpoint.split("/")[-1].split("-")[-1]
-            model = model_class.from_pretrained(checkpoint)
-            model.to(args.device)
-            trainer.predict(model, test_dataset=test_dataset, prefix=str(global_step))
-
 
 if __name__ == "__main__":
     main()
