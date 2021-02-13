@@ -11,6 +11,8 @@ pytorch版NEZHA，适配transformers
 1. [trainsformers>=4.1.1](https://github.com/huggingface/transformers)
 2. [TorchBlocks](https://github.com/lonePatient/TorchBlocks)
 
+若加载的模型权重是从下列**百度网盘**下载的PyTorch模型权重，则需要保证torch版本>=1.6.0
+
 ### 模型权重下载
 
 官方提供的Tensorflow版本权重下载地址：[huawei-noah](https://github.com/huawei-noah/Pretrained-Language-Model/tree/master/NEZHA-TensorFlow)
