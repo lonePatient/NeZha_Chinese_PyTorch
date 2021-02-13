@@ -6,7 +6,7 @@ pytorch版NEZHA，适配transformers
 
 ### 运行脚本依赖模块
 
-如果需要运行该example脚本，需要安装以下模块：
+如果需要运行该案例脚本，需要安装以下模块：
 
 1. [trainsformers>=4.1.1](https://github.com/huggingface/transformers)
 2. [TorchBlocks](https://github.com/lonePatient/TorchBlocks)
