@@ -21,9 +21,9 @@ pytorch版NEZHA，适配transformers
 
 * nezha-large-zh [百度网盘链接](https://pan.baidu.com/s/1ASg6xJeaO6dfxdeq0ozZ5w) 提取码: qks2
 
-* nezha-base-www [百度网盘链接](https://pan.baidu.com/s/1itZ_wdU6JdpXx2saK_zQhw) 提取码: ysg3
+* nezha-base-wwm [百度网盘链接](https://pan.baidu.com/s/1itZ_wdU6JdpXx2saK_zQhw) 提取码: ysg3
 
-* nezha-large-www [百度网盘链接](https://pan.baidu.com/s/1_QdimUFM9dD3q4JtAlAU3g) 提取码: 8dig
+* nezha-large-wwm [百度网盘链接](https://pan.baidu.com/s/1_QdimUFM9dD3q4JtAlAU3g) 提取码: 8dig
 
 ### 运行
 
@@ -33,7 +33,7 @@ sh scripts/run_task_text_classification_chnsenti.sh
 ```
 ### 结果
 
-| NEZHA(base-www) | chnsenti  |
+| NEZHA(base-wwm) | chnsenti  |
 | --------------- | --------- |
 | tensorflow      | 94.75     |
 | pytorch         | **94.92** |
