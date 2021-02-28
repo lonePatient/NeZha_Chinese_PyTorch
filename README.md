@@ -33,6 +33,14 @@ pytorch版NEZHA，适配transformers
 ```shell
 sh scripts/run_task_text_classification_chnsenti.sh
 ```
+### 长文本
+
+长文本可以通过设置`config.max_position_embeddings`参数实现，如：
+
+```python
+config.max_position_embeddings=args.train_max_seq_length
+```
+
 ### 结果
 
 | NEZHA(base-wwm) | chnsenti  |
