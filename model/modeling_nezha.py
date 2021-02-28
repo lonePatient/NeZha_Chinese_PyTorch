@@ -184,7 +184,7 @@ class NeZhaSelfAttention(nn.Module):
         self.key = nn.Linear(config.hidden_size, self.all_head_size)
         self.value = nn.Linear(config.hidden_size, self.all_head_size)
 
-        self.relative_positions_encoding = RelativePositionsEncoding(length=512, depth=self.attention_head_size,
+        self.relative_positions_encoding = RelativePositionsEncoding(length=config.max_position_embeddings, depth=self.attention_head_size,
                                                                      max_relative_position=config.max_relative_position)
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
 
