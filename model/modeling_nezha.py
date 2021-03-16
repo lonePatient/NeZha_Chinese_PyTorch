@@ -61,7 +61,7 @@ def load_tf_weights_in_nezha(model, config, tf_checkpoint_path):
         # which are not required for using pretrained model
         if any(
                 n in ["adam_v", "adam_m", "lamb_m", "lamb_v", "AdamWeightDecayOptimizer", "AdamWeightDecayOptimizer_1",
-                      "global_step","good_steps", "loss_scale", 'bad_steps']
+                      "global_step", "good_steps", "loss_scale", 'bad_steps']
                 for n in name
         ):
             logger.info("Skipping {}".format("/".join(name)))
@@ -109,6 +109,7 @@ class NeZhaEmbeddings(nn.Module):
     """
     Construct the embeddings from word, position and token_type embeddings.
     """
+
     def __init__(self, config):
         super().__init__()
         self.use_relative_position = config.use_relative_position
@@ -184,7 +185,8 @@ class NeZhaSelfAttention(nn.Module):
         self.key = nn.Linear(config.hidden_size, self.all_head_size)
         self.value = nn.Linear(config.hidden_size, self.all_head_size)
 
-        self.relative_positions_encoding = RelativePositionsEncoding(length=config.max_position_embeddings, depth=self.attention_head_size,
+        self.relative_positions_encoding = RelativePositionsEncoding(length=config.max_position_embeddings,
+                                                                     depth=self.attention_head_size,
                                                                      max_relative_position=config.max_relative_position)
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
 
@@ -408,6 +410,7 @@ class NeZhaPreTrainedModel(PreTrainedModel):
         if isinstance(module, nn.Linear) and module.bias is not None:
             module.bias.data.zero_()
 
+
 @add_start_docstrings(
     "The bare Bert Model transformer outputting raw hidden-states without any specific head on top.",
     BERT_START_DOCSTRING,
@@ -586,7 +589,7 @@ class NeZhaForPreTraining(NeZhaPreTrainedModel):
             position_ids=None,
             head_mask=None,
             inputs_embeds=None,
-            masked_lm_labels=None,
+            labels=None,
             next_sentence_label=None,
     ):
         r"""
@@ -652,9 +655,9 @@ class NeZhaForPreTraining(NeZhaPreTrainedModel):
         # add hidden states and attention if they are here
         outputs = (prediction_scores, seq_relationship_score,) + outputs[2:]
 
-        if masked_lm_labels is not None and next_sentence_label is not None:
+        if labels is not None and next_sentence_label is not None:
             loss_fct = CrossEntropyLoss()
-            masked_lm_loss = loss_fct(prediction_scores.view(-1, self.config.vocab_size), masked_lm_labels.view(-1))
+            masked_lm_loss = loss_fct(prediction_scores.view(-1, self.config.vocab_size), labels.view(-1))
             next_sentence_loss = loss_fct(seq_relationship_score.view(-1, 2), next_sentence_label.view(-1))
             total_loss = masked_lm_loss + next_sentence_loss
             outputs = (total_loss,) + outputs
@@ -682,10 +685,9 @@ class NeZhaForMaskedLM(NeZhaPreTrainedModel):
             position_ids=None,
             head_mask=None,
             inputs_embeds=None,
-            masked_lm_labels=None,
             encoder_hidden_states=None,
             encoder_attention_mask=None,
-            lm_labels=None,
+            labels=None,
     ):
         r"""
         masked_lm_labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`, defaults to :obj:`None`):
@@ -754,19 +756,11 @@ class NeZhaForMaskedLM(NeZhaPreTrainedModel):
         #    of predictions for masked words.
         # 2. If `lm_labels` is provided we are in a causal scenario where we
         #    try to predict the next token for each input in the decoder.
-        if masked_lm_labels is not None:
+        masked_lm_labels = None
+        if labels is not None:
             loss_fct = CrossEntropyLoss()  # -100 index = padding token
-            masked_lm_loss = loss_fct(prediction_scores.view(-1, self.config.vocab_size), masked_lm_labels.view(-1))
+            masked_lm_loss = loss_fct(prediction_scores.view(-1, self.config.vocab_size), labels.view(-1))
             outputs = (masked_lm_loss,) + outputs
-
-        if lm_labels is not None:
-            # we are doing next-token prediction; shift prediction scores and input ids by one
-            prediction_scores = prediction_scores[:, :-1, :].contiguous()
-            lm_labels = lm_labels[:, 1:].contiguous()
-            loss_fct = CrossEntropyLoss()
-            ltr_lm_loss = loss_fct(prediction_scores.view(-1, self.config.vocab_size), lm_labels.view(-1))
-            outputs = (ltr_lm_loss,) + outputs
-
         return outputs  # (ltr_lm_loss), (masked_lm_loss), prediction_scores, (hidden_states), (attentions)
 
     def prepare_inputs_for_generation(self, input_ids, attention_mask=None, **model_kwargs):
@@ -863,9 +857,7 @@ class NeZhaForNextSentencePrediction(NeZhaPreTrainedModel):
         )
 
         pooled_output = outputs[1]
-
         seq_relationship_score = self.cls(pooled_output)
-
         outputs = (seq_relationship_score,) + outputs[2:]  # add hidden states and attention if they are here
         if next_sentence_label is not None:
             loss_fct = CrossEntropyLoss()
