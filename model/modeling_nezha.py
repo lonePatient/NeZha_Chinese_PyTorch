@@ -120,7 +120,7 @@ class NeZhaEmbeddings(nn.Module):
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
-    def forward(self, input_ids=None, token_type_ids=None, position_ids=None, inputs_embeds=None):
+    def forward(self, input_ids=None, token_type_ids=None, inputs_embeds=None):
         if input_ids is not None:
             input_shape = input_ids.size()
         else:
@@ -137,34 +137,29 @@ class NeZhaEmbeddings(nn.Module):
         return embeddings
 
 
-class RelativePositionsEncoding(nn.Module):
-    def __init__(self, length, depth, max_relative_position=127):
-        super(RelativePositionsEncoding, self).__init__()
-        vocab_size = max_relative_position * 2 + 1
-        range_vec = torch.arange(length)
-        range_mat = range_vec.repeat(length).view(length, length)
-        distance_mat = range_mat - torch.t(range_mat)
-        distance_mat_clipped = torch.clamp(distance_mat, -max_relative_position, max_relative_position)
-        final_mat = distance_mat_clipped + max_relative_position
+def relative_position_encoding(depth, max_length=512, max_relative_position=127):
+    vocab_size = max_relative_position * 2 + 1
+    range_vec = torch.arange(max_length)
+    range_mat = range_vec.repeat(max_length).view(max_length, max_length)
+    distance_mat = range_mat - torch.t(range_mat)
+    distance_mat_clipped = torch.clamp(distance_mat, -max_relative_position, max_relative_position)
+    final_mat = distance_mat_clipped + max_relative_position
 
-        embeddings_table = torch.zeros(vocab_size, depth)
-        position = torch.arange(0, vocab_size, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, depth, 2).float() * (-math.log(10000.0) / depth))
-        embeddings_table[:, 0::2] = torch.sin(position * div_term)
-        embeddings_table[:, 1::2] = torch.cos(position * div_term)
-        embeddings_table = embeddings_table.unsqueeze(0).transpose(0, 1).squeeze(1)
+    embeddings_table = torch.zeros(vocab_size, depth)
+    position = torch.arange(0, vocab_size, dtype=torch.float).unsqueeze(1)
+    div_term = torch.exp(torch.arange(0, depth, 2).float() * (-math.log(10000.0) / depth))
+    embeddings_table[:, 0::2] = torch.sin(position * div_term)
+    embeddings_table[:, 1::2] = torch.cos(position * div_term)
+    embeddings_table = embeddings_table.unsqueeze(0).transpose(0, 1).squeeze(1)
 
-        flat_relative_positions_matrix = final_mat.view(-1)
-        one_hot_relative_positions_matrix = torch.nn.functional.one_hot(flat_relative_positions_matrix,
-                                                                        num_classes=vocab_size).float()
-        positions_encoding = torch.matmul(one_hot_relative_positions_matrix, embeddings_table)
-        my_shape = list(final_mat.size())
-        my_shape.append(depth)
-        positions_encoding = positions_encoding.view(my_shape)
-        self.register_buffer('positions_encoding', positions_encoding)
-
-    def forward(self, length):
-        return self.positions_encoding[:length, :length, :]
+    flat_relative_positions_matrix = final_mat.view(-1)
+    one_hot_relative_positions_matrix = torch.nn.functional.one_hot(flat_relative_positions_matrix,
+                                                                    num_classes=vocab_size).float()
+    positions_encoding = torch.matmul(one_hot_relative_positions_matrix, embeddings_table)
+    my_shape = list(final_mat.size())
+    my_shape.append(depth)
+    positions_encoding = positions_encoding.view(my_shape)
+    return positions_encoding
 
 
 class NeZhaSelfAttention(nn.Module):
@@ -184,11 +179,11 @@ class NeZhaSelfAttention(nn.Module):
         self.query = nn.Linear(config.hidden_size, self.all_head_size)
         self.key = nn.Linear(config.hidden_size, self.all_head_size)
         self.value = nn.Linear(config.hidden_size, self.all_head_size)
+        self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
 
-        self.relative_positions_encoding = RelativePositionsEncoding(length=config.max_position_embeddings,
+        self.relative_positions_encoding = relative_position_encoding(max_length=config.max_position_embeddings,
                                                                      depth=self.attention_head_size,
                                                                      max_relative_position=config.max_relative_position)
-        self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
 
     def transpose_for_scores(self, x):
         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
@@ -225,8 +220,9 @@ class NeZhaSelfAttention(nn.Module):
 
         batch_size, num_attention_heads, from_seq_length, to_seq_length = attention_scores.size()
 
-        relations_keys = self.relative_positions_encoding(to_seq_length)
+        relations_keys = self.relative_positions_encoding[:to_seq_length, :to_seq_length, :].to(hidden_states.device)
         query_layer_t = query_layer.permute(2, 0, 1, 3)
+
         query_layer_r = query_layer_t.contiguous().view(from_seq_length, batch_size * num_attention_heads,
                                                         self.attention_head_size)
         key_position_scores = torch.matmul(query_layer_r, relations_keys.permute(0, 2, 1))
@@ -253,8 +249,7 @@ class NeZhaSelfAttention(nn.Module):
 
         context_layer = torch.matmul(attention_probs, value_layer)
 
-        relations_values = self.relative_positions_encoding(to_seq_length)
-
+        relations_values = self.relative_positions_encoding[:to_seq_length, :to_seq_length, :].to(hidden_states.device)
         attention_probs_t = attention_probs.permute(2, 0, 1, 3)
         attentions_probs_r = attention_probs_t.contiguous().view(from_seq_length, batch_size * num_attention_heads,
                                                                  to_seq_length)
@@ -459,7 +454,6 @@ class NeZhaModel(NeZhaPreTrainedModel):
             input_ids=None,
             attention_mask=None,
             token_type_ids=None,
-            position_ids=None,
             head_mask=None,
             inputs_embeds=None,
             encoder_hidden_states=None,
@@ -547,7 +541,7 @@ class NeZhaModel(NeZhaPreTrainedModel):
         head_mask = self.get_head_mask(head_mask, self.config.num_hidden_layers)
 
         embedding_output = self.embeddings(
-            input_ids=input_ids, position_ids=position_ids, token_type_ids=token_type_ids, inputs_embeds=inputs_embeds
+            input_ids=input_ids, token_type_ids=token_type_ids, inputs_embeds=inputs_embeds
         )
         encoder_outputs = self.encoder(
             embedding_output,
@@ -586,7 +580,6 @@ class NeZhaForPreTraining(NeZhaPreTrainedModel):
             input_ids=None,
             attention_mask=None,
             token_type_ids=None,
-            position_ids=None,
             head_mask=None,
             inputs_embeds=None,
             labels=None,
@@ -645,7 +638,6 @@ class NeZhaForPreTraining(NeZhaPreTrainedModel):
             input_ids,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
-            position_ids=position_ids,
             head_mask=head_mask,
             inputs_embeds=inputs_embeds,
         )
@@ -682,7 +674,6 @@ class NeZhaForMaskedLM(NeZhaPreTrainedModel):
             input_ids=None,
             attention_mask=None,
             token_type_ids=None,
-            position_ids=None,
             head_mask=None,
             inputs_embeds=None,
             encoder_hidden_states=None,
@@ -739,7 +730,6 @@ class NeZhaForMaskedLM(NeZhaPreTrainedModel):
             input_ids,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
-            position_ids=position_ids,
             head_mask=head_mask,
             inputs_embeds=inputs_embeds,
             encoder_hidden_states=encoder_hidden_states,
@@ -802,7 +792,6 @@ class NeZhaForNextSentencePrediction(NeZhaPreTrainedModel):
             input_ids=None,
             attention_mask=None,
             token_type_ids=None,
-            position_ids=None,
             head_mask=None,
             inputs_embeds=None,
             next_sentence_label=None,
@@ -851,7 +840,6 @@ class NeZhaForNextSentencePrediction(NeZhaPreTrainedModel):
             input_ids,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
-            position_ids=position_ids,
             head_mask=head_mask,
             inputs_embeds=inputs_embeds,
         )
@@ -887,7 +875,6 @@ class NeZhaForSequenceClassification(NeZhaPreTrainedModel):
             input_ids=None,
             attention_mask=None,
             token_type_ids=None,
-            position_ids=None,
             head_mask=None,
             inputs_embeds=None,
             labels=None,
@@ -937,7 +924,6 @@ class NeZhaForSequenceClassification(NeZhaPreTrainedModel):
             input_ids,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
-            position_ids=position_ids,
             head_mask=head_mask,
             inputs_embeds=inputs_embeds,
         )
@@ -981,7 +967,6 @@ class NeZhaForMultipleChoice(NeZhaPreTrainedModel):
             input_ids=None,
             attention_mask=None,
             token_type_ids=None,
-            position_ids=None,
             head_mask=None,
             inputs_embeds=None,
             labels=None,
@@ -1033,13 +1018,11 @@ class NeZhaForMultipleChoice(NeZhaPreTrainedModel):
         input_ids = input_ids.view(-1, input_ids.size(-1))
         attention_mask = attention_mask.view(-1, attention_mask.size(-1)) if attention_mask is not None else None
         token_type_ids = token_type_ids.view(-1, token_type_ids.size(-1)) if token_type_ids is not None else None
-        position_ids = position_ids.view(-1, position_ids.size(-1)) if position_ids is not None else None
 
         outputs = self.bert(
             input_ids,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
-            position_ids=position_ids,
             head_mask=head_mask,
             inputs_embeds=inputs_embeds,
         )
@@ -1080,7 +1063,6 @@ class NeZhaForTokenClassification(NeZhaPreTrainedModel):
             input_ids=None,
             attention_mask=None,
             token_type_ids=None,
-            position_ids=None,
             head_mask=None,
             inputs_embeds=None,
             labels=None,
@@ -1128,7 +1110,6 @@ class NeZhaForTokenClassification(NeZhaPreTrainedModel):
             input_ids,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
-            position_ids=position_ids,
             head_mask=head_mask,
             inputs_embeds=inputs_embeds,
         )
@@ -1175,7 +1156,6 @@ class NeZhaForQuestionAnswering(NeZhaPreTrainedModel):
             input_ids=None,
             attention_mask=None,
             token_type_ids=None,
-            position_ids=None,
             head_mask=None,
             inputs_embeds=None,
             start_positions=None,
@@ -1235,7 +1215,6 @@ class NeZhaForQuestionAnswering(NeZhaPreTrainedModel):
             input_ids,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
-            position_ids=position_ids,
             head_mask=head_mask,
             inputs_embeds=inputs_embeds,
         )
@@ -1266,3 +1245,4 @@ class NeZhaForQuestionAnswering(NeZhaPreTrainedModel):
             outputs = (total_loss,) + outputs
 
         return outputs  # (loss), start_logits, end_logits, (hidden_states), (attentions)
+
