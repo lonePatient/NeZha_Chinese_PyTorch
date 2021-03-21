@@ -455,6 +455,7 @@ class NeZhaModel(NeZhaPreTrainedModel):
             attention_mask=None,
             token_type_ids=None,
             head_mask=None,
+            position_ids=None,
             inputs_embeds=None,
             encoder_hidden_states=None,
             encoder_attention_mask=None,
@@ -581,6 +582,7 @@ class NeZhaForPreTraining(NeZhaPreTrainedModel):
             attention_mask=None,
             token_type_ids=None,
             head_mask=None,
+            position_ids=None,
             inputs_embeds=None,
             labels=None,
             next_sentence_label=None,
@@ -675,6 +677,7 @@ class NeZhaForMaskedLM(NeZhaPreTrainedModel):
             attention_mask=None,
             token_type_ids=None,
             head_mask=None,
+            position_ids=None,
             inputs_embeds=None,
             encoder_hidden_states=None,
             encoder_attention_mask=None,
@@ -793,6 +796,7 @@ class NeZhaForNextSentencePrediction(NeZhaPreTrainedModel):
             attention_mask=None,
             token_type_ids=None,
             head_mask=None,
+            position_ids=None,
             inputs_embeds=None,
             next_sentence_label=None,
     ):
@@ -875,6 +879,7 @@ class NeZhaForSequenceClassification(NeZhaPreTrainedModel):
             input_ids=None,
             attention_mask=None,
             token_type_ids=None,
+            position_ids=None,
             head_mask=None,
             inputs_embeds=None,
             labels=None,
@@ -968,6 +973,7 @@ class NeZhaForMultipleChoice(NeZhaPreTrainedModel):
             attention_mask=None,
             token_type_ids=None,
             head_mask=None,
+            position_ids=None,
             inputs_embeds=None,
             labels=None,
     ):
@@ -1064,6 +1070,7 @@ class NeZhaForTokenClassification(NeZhaPreTrainedModel):
             attention_mask=None,
             token_type_ids=None,
             head_mask=None,
+            position_ids=None,
             inputs_embeds=None,
             labels=None,
     ):
@@ -1158,6 +1165,7 @@ class NeZhaForQuestionAnswering(NeZhaPreTrainedModel):
             token_type_ids=None,
             head_mask=None,
             inputs_embeds=None,
+            position_ids=None,
             start_positions=None,
             end_positions=None,
     ):
