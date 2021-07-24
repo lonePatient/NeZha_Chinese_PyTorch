@@ -10,16 +10,13 @@ from transformers import  BertTokenizer, WEIGHTS_NAME
 from model.modeling_nezha import NeZhaForSequenceClassification
 from model.configuration_nezha import NeZhaConfig
 
-
 MODEL_CLASSES = {
     'nezha': (NeZhaConfig, NeZhaForSequenceClassification, BertTokenizer)
 }
 
-
 class ChnSentiProcessor(TextClassifierProcessor):
 
     def get_labels(self):
-        """See base class."""
         return ["0", "1"]
 
     def read_data(self, input_file):

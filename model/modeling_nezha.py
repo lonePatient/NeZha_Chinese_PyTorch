@@ -1,14 +1,21 @@
 import math
 import os
+import re
 import logging
 import torch
 
 from torch import nn
 from torch.nn import CrossEntropyLoss, MSELoss
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 from .configuration_nezha import NeZhaConfig
-from transformers.file_utils import add_start_docstrings, add_start_docstrings_to_model_forward
-from transformers.modeling_utils import PreTrainedModel, prune_linear_layer
+from transformers.configuration_utils import PretrainedConfig
+from transformers.modeling_utils import (
+    PreTrainedModel,
+    prune_linear_layer,
+    unwrap_model
+)
+
 from transformers.models.bert.modeling_bert import (
     BertOutput,
     BertPooler,
@@ -19,6 +26,18 @@ from transformers.models.bert.modeling_bert import (
     BertPreTrainingHeads,
     BERT_START_DOCSTRING,
     BERT_INPUTS_DOCSTRING,
+)
+
+from transformers.file_utils import (
+    TF2_WEIGHTS_NAME,
+    TF_WEIGHTS_NAME,
+    WEIGHTS_NAME,
+    cached_path,
+    hf_bucket_url,
+    is_offline_mode,
+    is_remote_url,
+    add_start_docstrings,
+    add_start_docstrings_to_model_forward
 )
 
 logger = logging.getLogger(__name__)
@@ -137,29 +156,34 @@ class NeZhaEmbeddings(nn.Module):
         return embeddings
 
 
-def relative_position_encoding(depth, max_length=512, max_relative_position=127):
-    vocab_size = max_relative_position * 2 + 1
-    range_vec = torch.arange(max_length)
-    range_mat = range_vec.repeat(max_length).view(max_length, max_length)
-    distance_mat = range_mat - torch.t(range_mat)
-    distance_mat_clipped = torch.clamp(distance_mat, -max_relative_position, max_relative_position)
-    final_mat = distance_mat_clipped + max_relative_position
+class RelativePositionsEncoding(nn.Module):
+    def __init__(self, length, depth, max_relative_position=127):
+        super(RelativePositionsEncoding, self).__init__()
+        vocab_size = max_relative_position * 2 + 1
+        range_vec = torch.arange(length)
+        range_mat = range_vec.repeat(length).view(length, length)
+        distance_mat = range_mat - torch.t(range_mat)
+        distance_mat_clipped = torch.clamp(distance_mat, -max_relative_position, max_relative_position)
+        final_mat = distance_mat_clipped + max_relative_position
 
-    embeddings_table = torch.zeros(vocab_size, depth)
-    position = torch.arange(0, vocab_size, dtype=torch.float).unsqueeze(1)
-    div_term = torch.exp(torch.arange(0, depth, 2).float() * (-math.log(10000.0) / depth))
-    embeddings_table[:, 0::2] = torch.sin(position * div_term)
-    embeddings_table[:, 1::2] = torch.cos(position * div_term)
-    embeddings_table = embeddings_table.unsqueeze(0).transpose(0, 1).squeeze(1)
+        embeddings_table = torch.zeros(vocab_size, depth)
+        position = torch.arange(0, vocab_size, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, depth, 2).float() * (-math.log(10000.0) / depth))
+        embeddings_table[:, 0::2] = torch.sin(position * div_term)
+        embeddings_table[:, 1::2] = torch.cos(position * div_term)
+        embeddings_table = embeddings_table.unsqueeze(0).transpose(0, 1).squeeze(1)
 
-    flat_relative_positions_matrix = final_mat.view(-1)
-    one_hot_relative_positions_matrix = torch.nn.functional.one_hot(flat_relative_positions_matrix,
-                                                                    num_classes=vocab_size).float()
-    positions_encoding = torch.matmul(one_hot_relative_positions_matrix, embeddings_table)
-    my_shape = list(final_mat.size())
-    my_shape.append(depth)
-    positions_encoding = positions_encoding.view(my_shape)
-    return positions_encoding
+        flat_relative_positions_matrix = final_mat.view(-1)
+        one_hot_relative_positions_matrix = torch.nn.functional.one_hot(flat_relative_positions_matrix,
+                                                                        num_classes=vocab_size).float()
+        positions_encoding = torch.matmul(one_hot_relative_positions_matrix, embeddings_table)
+        my_shape = list(final_mat.size())
+        my_shape.append(depth)
+        positions_encoding = positions_encoding.view(my_shape)
+        self.register_buffer('positions_encoding', positions_encoding)
+
+    def forward(self, length):
+        return self.positions_encoding[:length, :length, :]
 
 
 class NeZhaSelfAttention(nn.Module):
@@ -171,7 +195,6 @@ class NeZhaSelfAttention(nn.Module):
                 "heads (%d)" % (config.hidden_size, config.num_attention_heads)
             )
         self.output_attentions = config.output_attentions
-
         self.num_attention_heads = config.num_attention_heads
         self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
         self.all_head_size = self.num_attention_heads * self.attention_head_size
@@ -181,7 +204,7 @@ class NeZhaSelfAttention(nn.Module):
         self.value = nn.Linear(config.hidden_size, self.all_head_size)
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
 
-        self.relative_positions_encoding = relative_position_encoding(max_length=config.max_position_embeddings,
+        self.relative_positions_encoding = RelativePositionsEncoding(length=config.max_position_embeddings,
                                                                      depth=self.attention_head_size,
                                                                      max_relative_position=config.max_relative_position)
 
@@ -220,7 +243,7 @@ class NeZhaSelfAttention(nn.Module):
 
         batch_size, num_attention_heads, from_seq_length, to_seq_length = attention_scores.size()
 
-        relations_keys = self.relative_positions_encoding[:to_seq_length, :to_seq_length, :].to(hidden_states.device)
+        relations_keys = self.relative_positions_encoding(to_seq_length)
         query_layer_t = query_layer.permute(2, 0, 1, 3)
 
         query_layer_r = query_layer_t.contiguous().view(from_seq_length, batch_size * num_attention_heads,
@@ -249,7 +272,7 @@ class NeZhaSelfAttention(nn.Module):
 
         context_layer = torch.matmul(attention_probs, value_layer)
 
-        relations_values = self.relative_positions_encoding[:to_seq_length, :to_seq_length, :].to(hidden_states.device)
+        relations_values = self.relative_positions_encoding(to_seq_length)
         attention_probs_t = attention_probs.permute(2, 0, 1, 3)
         attentions_probs_r = attention_probs_t.contiguous().view(from_seq_length, batch_size * num_attention_heads,
                                                                  to_seq_length)
@@ -404,6 +427,292 @@ class NeZhaPreTrainedModel(PreTrainedModel):
             module.weight.data.fill_(1.0)
         if isinstance(module, nn.Linear) and module.bias is not None:
             module.bias.data.zero_()
+
+    def save_pretrained(
+            self,
+            save_directory: Union[str, os.PathLike],
+            save_config: bool = True,
+            state_dict: Optional[dict] = None,
+            save_function: Callable = torch.save,
+    ):
+        if os.path.isfile(save_directory):
+            logger.error(f"Provided path ({save_directory}) should be a directory, not a file")
+            return
+        os.makedirs(save_directory, exist_ok=True)
+
+        # Only save the model itself if we are using distributed training
+        model_to_save = unwrap_model(self)
+
+        # Attach architecture to the config
+        model_to_save.config.architectures = [model_to_save.__class__.__name__]
+
+        # Save the config
+        if save_config:
+            model_to_save.config.save_pretrained(save_directory)
+
+        # Save the model
+        if state_dict is None:
+            state_dict = model_to_save.state_dict()
+
+        # Handle the case where some state_dict keys shouldn't be saved
+        if self._keys_to_ignore_on_save is not None:
+            state_dict = {k: v for k, v in state_dict.items() if k not in self._keys_to_ignore_on_save}
+        state_dict = {k: v for k, v in state_dict.items() if 'relative_positions' not in k}
+        # If we save using the predefined names, we can load using `from_pretrained`
+        output_model_file = os.path.join(save_directory, WEIGHTS_NAME)
+        save_function(state_dict, output_model_file)
+        logger.info(f"Model weights saved in {output_model_file}")
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path: Optional[Union[str, os.PathLike]], *model_args, **kwargs):
+        config = kwargs.pop("config", None)
+        state_dict = kwargs.pop("state_dict", None)
+        cache_dir = kwargs.pop("cache_dir", None)
+        from_tf = kwargs.pop("from_tf", False)
+        force_download = kwargs.pop("force_download", False)
+        resume_download = kwargs.pop("resume_download", False)
+        proxies = kwargs.pop("proxies", None)
+        output_loading_info = kwargs.pop("output_loading_info", False)
+        local_files_only = kwargs.pop("local_files_only", False)
+        use_auth_token = kwargs.pop("use_auth_token", None)
+        revision = kwargs.pop("revision", None)
+        mirror = kwargs.pop("mirror", None)
+        from_pipeline = kwargs.pop("_from_pipeline", None)
+        from_auto_class = kwargs.pop("_from_auto", False)
+
+        user_agent = {"file_type": "model", "framework": "pytorch", "from_auto_class": from_auto_class}
+        if from_pipeline is not None:
+            user_agent["using_pipeline"] = from_pipeline
+
+        if is_offline_mode() and not local_files_only:
+            logger.info("Offline mode: forcing local_files_only=True")
+            local_files_only = True
+        # Load config if we don't provide a configuration
+        if not isinstance(config, PretrainedConfig):
+            config_path = config if config is not None else pretrained_model_name_or_path
+            config, model_kwargs = cls.config_class.from_pretrained(
+                config_path,
+                *model_args,
+                cache_dir=cache_dir,
+                return_unused_kwargs=True,
+                force_download=force_download,
+                resume_download=resume_download,
+                proxies=proxies,
+                local_files_only=local_files_only,
+                use_auth_token=use_auth_token,
+                revision=revision,
+                _from_auto=from_auto_class,
+                _from_pipeline=from_pipeline,
+                **kwargs,
+            )
+        else:
+            model_kwargs = kwargs
+        # Load model
+        if pretrained_model_name_or_path is not None:
+            pretrained_model_name_or_path = str(pretrained_model_name_or_path)
+            if os.path.isdir(pretrained_model_name_or_path):
+                if from_tf and os.path.isfile(os.path.join(pretrained_model_name_or_path, TF_WEIGHTS_NAME + ".index")):
+                    # Load from a TF 1.0 checkpoint in priority if from_tf
+                    archive_file = os.path.join(pretrained_model_name_or_path, TF_WEIGHTS_NAME + ".index")
+                elif from_tf and os.path.isfile(os.path.join(pretrained_model_name_or_path, TF2_WEIGHTS_NAME)):
+                    # Load from a TF 2.0 checkpoint in priority if from_tf
+                    archive_file = os.path.join(pretrained_model_name_or_path, TF2_WEIGHTS_NAME)
+                elif os.path.isfile(os.path.join(pretrained_model_name_or_path, WEIGHTS_NAME)):
+                    # Load from a PyTorch checkpoint
+                    archive_file = os.path.join(pretrained_model_name_or_path, WEIGHTS_NAME)
+                else:
+                    raise EnvironmentError(
+                        f"Error no file named {[WEIGHTS_NAME, TF2_WEIGHTS_NAME, TF_WEIGHTS_NAME + '.index']} found in "
+                        f"directory {pretrained_model_name_or_path} or `from_tf` set to False."
+                    )
+            elif os.path.isfile(pretrained_model_name_or_path) or is_remote_url(pretrained_model_name_or_path):
+                archive_file = pretrained_model_name_or_path
+            elif os.path.isfile(pretrained_model_name_or_path + ".index"):
+                if not from_tf:
+                    raise ValueError(
+                        f"We found a TensorFlow checkpoint at {pretrained_model_name_or_path + '.index'}, please set "
+                        "from_tf to True to load from this checkpoint."
+                    )
+                archive_file = pretrained_model_name_or_path + ".index"
+            else:
+                archive_file = hf_bucket_url(
+                    pretrained_model_name_or_path,
+                    filename=(TF2_WEIGHTS_NAME if from_tf else WEIGHTS_NAME),
+                    revision=revision,
+                    mirror=mirror,
+                )
+
+            try:
+                # Load from URL or cache if already cached
+                resolved_archive_file = cached_path(
+                    archive_file,
+                    cache_dir=cache_dir,
+                    force_download=force_download,
+                    proxies=proxies,
+                    resume_download=resume_download,
+                    local_files_only=local_files_only,
+                    use_auth_token=use_auth_token,
+                    user_agent=user_agent,
+                )
+            except EnvironmentError as err:
+                logger.error(err)
+                msg = (
+                    f"Can't load weights for '{pretrained_model_name_or_path}'. Make sure that:\n\n"
+                    f"- '{pretrained_model_name_or_path}' is a correct model identifier listed on 'https://huggingface.co/models'\n\n"
+                    f"- or '{pretrained_model_name_or_path}' is the correct path to a directory containing a file named one of {WEIGHTS_NAME}, {TF2_WEIGHTS_NAME}, {TF_WEIGHTS_NAME}.\n\n"
+                )
+                raise EnvironmentError(msg)
+
+            if resolved_archive_file == archive_file:
+                logger.info(f"loading weights file {archive_file}")
+            else:
+                logger.info(f"loading weights file {archive_file} from cache at {resolved_archive_file}")
+        else:
+            resolved_archive_file = None
+
+        config.name_or_path = pretrained_model_name_or_path
+
+        # Instantiate model.
+        model = cls(config, *model_args, **model_kwargs)
+
+        if state_dict is None and not from_tf:
+            try:
+                state_dict = torch.load(resolved_archive_file, map_location="cpu")
+            except Exception:
+                raise OSError(
+                    f"Unable to load weights from pytorch checkpoint file for '{pretrained_model_name_or_path}' "
+                    f"at '{resolved_archive_file}'"
+                    "If you tried to load a PyTorch model from a TF 2.0 checkpoint, please set from_tf=True. "
+                )
+
+        missing_keys = []
+        unexpected_keys = []
+        error_msgs = []
+
+        if from_tf:
+            if resolved_archive_file.endswith(".index"):
+                # Load from a TensorFlow 1.X checkpoint - provided by original authors
+                model = cls.load_tf_weights(model, config, resolved_archive_file[:-6])  # Remove the '.index'
+            else:
+                # Load from our TensorFlow 2.0 checkpoints
+                try:
+                    from .modeling_tf_pytorch_utils import load_tf2_checkpoint_in_pytorch_model
+
+                    model = load_tf2_checkpoint_in_pytorch_model(model, resolved_archive_file, allow_missing_keys=True)
+                except ImportError:
+                    logger.error(
+                        "Loading a TensorFlow model in PyTorch, requires both PyTorch and TensorFlow to be installed. Please see "
+                        "https://pytorch.org/ and https://www.tensorflow.org/install/ for installation instructions."
+                    )
+                    raise
+        else:
+            # Convert old format to new format if needed from a PyTorch state_dict
+            old_keys = []
+            new_keys = []
+            for key in state_dict.keys():
+                new_key = None
+                if "gamma" in key:
+                    new_key = key.replace("gamma", "weight")
+                if "beta" in key:
+                    new_key = key.replace("beta", "bias")
+                if new_key:
+                    old_keys.append(key)
+                    new_keys.append(new_key)
+            for old_key, new_key in zip(old_keys, new_keys):
+                state_dict[new_key] = state_dict.pop(old_key)
+
+            # copy state_dict so _load_from_state_dict can modify it
+            metadata = getattr(state_dict, "_metadata", None)
+            state_dict = state_dict.copy()
+            if metadata is not None:
+                state_dict._metadata = metadata
+
+            # PyTorch's `_load_from_state_dict` does not copy parameters in a module's descendants
+            # so we need to apply the function recursively.
+            def load(module: nn.Module, prefix=""):
+                local_metadata = {} if metadata is None else metadata.get(prefix[:-1], {})
+                module._load_from_state_dict(
+                    state_dict,
+                    prefix,
+                    local_metadata,
+                    True,
+                    missing_keys,
+                    unexpected_keys,
+                    error_msgs,
+                )
+                for name, child in module._modules.items():
+                    if child is not None:
+                        load(child, prefix + name + ".")
+
+            # Make sure we are able to load base models as well as derived models (with heads)
+            start_prefix = ""
+            model_to_load = model
+            has_prefix_module = any(s.startswith(cls.base_model_prefix) for s in state_dict.keys())
+            if not hasattr(model, cls.base_model_prefix) and has_prefix_module:
+                start_prefix = cls.base_model_prefix + "."
+            if hasattr(model, cls.base_model_prefix) and not has_prefix_module:
+                model_to_load = getattr(model, cls.base_model_prefix)
+
+            load(model_to_load, prefix=start_prefix)
+
+            if model.__class__.__name__ != model_to_load.__class__.__name__:
+                base_model_state_dict = model_to_load.state_dict().keys()
+                head_model_state_dict_without_base_prefix = [
+                    key.split(cls.base_model_prefix + ".")[-1] for key in model.state_dict().keys()
+                ]
+                missing_keys.extend(head_model_state_dict_without_base_prefix - base_model_state_dict)
+
+            # Some models may have keys that are not in the state by design, removing them before needlessly warning
+            # the user.
+            if cls._keys_to_ignore_on_load_missing is not None:
+                for pat in cls._keys_to_ignore_on_load_missing:
+                    missing_keys = [k for k in missing_keys if re.search(pat, k) is None]
+
+            if cls._keys_to_ignore_on_load_unexpected is not None:
+                for pat in cls._keys_to_ignore_on_load_unexpected:
+                    unexpected_keys = [k for k in unexpected_keys if re.search(pat, k) is None]
+
+            if len(unexpected_keys) > 0:
+                unexpected_keys = [k for k in unexpected_keys if 'relative_positions' not in k]
+                logger.warning(
+                    f"Some weights of the model checkpoint at {pretrained_model_name_or_path} were not used when "
+                    f"initializing {model.__class__.__name__}: {unexpected_keys}\n"
+                    f"- This IS expected if you are initializing {model.__class__.__name__} from the checkpoint of a model trained on another task "
+                    f"or with another architecture (e.g. initializing a BertForSequenceClassification model from a BertForPreTraining model).\n"
+                    f"- This IS NOT expected if you are initializing {model.__class__.__name__} from the checkpoint of a model that you expect "
+                    f"to be exactly identical (initializing a BertForSequenceClassification model from a BertForSequenceClassification model)."
+                )
+            else:
+                logger.info(f"All model checkpoint weights were used when initializing {model.__class__.__name__}.\n")
+            if len(missing_keys) > 0:
+                missing_keys = [k for k in missing_keys if 'relative_positions' not in k]
+                logger.warning(
+                    f"Some weights of {model.__class__.__name__} were not initialized from the model checkpoint at {pretrained_model_name_or_path} "
+                    f"and are newly initialized: {missing_keys}\n"
+                    f"You should probably TRAIN this model on a down-stream task to be able to use it for predictions and inference."
+                )
+            else:
+                logger.info(
+                    f"All the weights of {model.__class__.__name__} were initialized from the model checkpoint at {pretrained_model_name_or_path}.\n"
+                    f"If your task is similar to the task the model of the checkpoint was trained on, "
+                    f"you can already use {model.__class__.__name__} for predictions without further training."
+                )
+            if len(error_msgs) > 0:
+                error_msg = "\n\t".join(error_msgs)
+                raise RuntimeError(f"Error(s) in loading state_dict for {model.__class__.__name__}:\n\t{error_msg}")
+        # make sure token embedding weights are still tied if needed
+        model.tie_weights()
+        # Set model in evaluation mode to deactivate DropOut modules by default
+        model.eval()
+        if output_loading_info:
+            loading_info = {
+                "missing_keys": missing_keys,
+                "unexpected_keys": unexpected_keys,
+                "error_msgs": error_msgs,
+            }
+            return model, loading_info
+
+        return model
 
 
 @add_start_docstrings(
@@ -1122,10 +1431,8 @@ class NeZhaForTokenClassification(NeZhaPreTrainedModel):
         )
 
         sequence_output = outputs[0]
-
         sequence_output = self.dropout(sequence_output)
         logits = self.classifier(sequence_output)
-
         outputs = (logits,) + outputs[2:]  # add hidden states and attention if they are here
         if labels is not None:
             loss_fct = CrossEntropyLoss()
@@ -1228,12 +1535,10 @@ class NeZhaForQuestionAnswering(NeZhaPreTrainedModel):
         )
 
         sequence_output = outputs[0]
-
         logits = self.qa_outputs(sequence_output)
         start_logits, end_logits = logits.split(1, dim=-1)
         start_logits = start_logits.squeeze(-1)
         end_logits = end_logits.squeeze(-1)
-
         outputs = (start_logits, end_logits,) + outputs[2:]
         if start_positions is not None and end_positions is not None:
             # If we are on multi-GPU, split add a dimension
@@ -1251,6 +1556,4 @@ class NeZhaForQuestionAnswering(NeZhaPreTrainedModel):
             end_loss = loss_fct(end_logits, end_positions)
             total_loss = (start_loss + end_loss) / 2
             outputs = (total_loss,) + outputs
-
         return outputs  # (loss), start_logits, end_logits, (hidden_states), (attentions)
-
