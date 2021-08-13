@@ -30,7 +30,8 @@ def convert_tf_checkpoint_to_pytorch(tf_checkpoint_path, nezha_config_file, pyto
     load_tf_weights_in_nezha(model, config, tf_checkpoint_path)
     # Save pytorch-model
     print("Save PyTorch model to {}".format(pytorch_dump_path))
-    torch.save(model.state_dict(), pytorch_dump_path)
+    state_dict = {k: v for k, v in model.state_dict().items() if 'relative_positions' not in k}
+    torch.save(state_dict, pytorch_dump_path)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
